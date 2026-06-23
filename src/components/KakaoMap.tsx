@@ -1,6 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
 import { useKakaoMapsSDK } from '../hooks/useKakaoMapsSDK';
-import { useSeoulGeoJson, ringToLatLng } from '../hooks/useSeoulGeoJson';
+import {
+  useSeoulGeoJson,
+  ringToLatLng,
+  ringCentroid,
+  SeoulFeature,
+} from '../hooks/useSeoulGeoJson';
 import { SEOUL_DISTRICTS, DistrictInfo } from '../data/seoulDistrictData';
 import { getChoroColor, buildGradientCss } from '../utils/choropleth';
 
@@ -12,15 +17,14 @@ const allValues = SEOUL_DISTRICTS.map((d) => d.value);
 const MIN_VAL = Math.min(...allValues);
 const MAX_VAL = Math.max(...allValues);
 
-function centroidOfRing(ring: number[][]): [number, number] {
-  const lat = ring.reduce((s, p) => s + p[1], 0) / ring.length;
-  const lng = ring.reduce((s, p) => s + p[0], 0) / ring.length;
-  return [lat, lng];
-}
-
-// GeoJSON feature의 구 이름 추출 (여러 가능한 속성명 대응)
-function getDistrictName(props: Record<string, string>): string {
-  return props.name ?? props.SIG_KOR_NM ?? props.NAME ?? '';
+// feature의 geometry에서 outer ring 목록 반환
+function getOuterRings(feature: SeoulFeature): number[][][] {
+  const { geometry } = feature;
+  if (geometry.type === 'Polygon') {
+    return [geometry.coordinates[0] as number[][]];
+  }
+  // MultiPolygon: 각 polygon의 outer ring
+  return (geometry.coordinates as number[][][][]).map((poly) => poly[0]);
 }
 
 export default function KakaoMap() {
@@ -44,7 +48,7 @@ export default function KakaoMap() {
     });
     mapInstanceRef.current = map;
 
-    // hover 툴팁 오버레이
+    // hover 툴팁
     const hoverEl = document.createElement('div');
     hoverEl.className = 'district-tooltip';
     hoverElRef.current = hoverEl;
@@ -56,71 +60,74 @@ export default function KakaoMap() {
     });
     hoverOverlayRef.current = hoverOverlay;
 
+    // 구별로 feature 묶기 → 구 라벨 중심 계산용
+    const guCenterAccum = new Map<string, { latSum: number; lngSum: number; count: number }>();
+
     geoJson.features.forEach((feature) => {
-      const districtName = getDistrictName(feature.properties);
-      const value = valueMap.get(districtName);
+      const guName = feature.properties.sggnm;       // 예: "종로구"
+      const dongName = feature.properties.adm_nm;    // 예: "서울특별시 종로구 사직동"
+      const value = valueMap.get(guName);
       if (value === undefined) return; // 서울 25개 구 이외 제외
 
       const color = getChoroColor(value, MIN_VAL, MAX_VAL);
-      const { geometry } = feature;
+      const outerRings = getOuterRings(feature);
 
-      // Polygon / MultiPolygon 모두 지원
-      const rings: number[][][] =
-        geometry.type === 'Polygon'
-          ? (geometry.coordinates as number[][][])
-          : (geometry.coordinates as number[][][][]).flat();
-
-      rings.forEach((ring) => {
+      outerRings.forEach((ring) => {
         const path = ringToLatLng(ring);
         const polygon = new kakao.maps.Polygon({
           map,
           path,
-          strokeWeight: 1.5,
+          strokeWeight: 1,
           strokeColor: '#ffffff',
-          strokeOpacity: 0.9,
+          strokeOpacity: 0.7,
           fillColor: color,
           fillOpacity: 0.75,
           zIndex: 1,
         });
         polygonsRef.current.push(polygon);
 
-        const [cLat, cLng] = centroidOfRing(ring);
+        const [cLat, cLng] = ringCentroid(ring);
 
         kakao.maps.event.addListener(polygon, 'mouseover', () => {
-          polygon.setOptions({ fillOpacity: 0.95, strokeWeight: 2.5 });
-          hoverEl.textContent = districtName;
+          polygon.setOptions({ fillOpacity: 0.95, strokeWeight: 2 });
+          hoverEl.textContent = dongName;
           hoverOverlay.setPosition(new kakao.maps.LatLng(cLat, cLng));
           hoverOverlay.setMap(map);
         });
-
         kakao.maps.event.addListener(polygon, 'mouseout', () => {
-          polygon.setOptions({ fillOpacity: 0.75, strokeWeight: 1.5 });
+          polygon.setOptions({ fillOpacity: 0.75, strokeWeight: 1 });
           hoverOverlay.setMap(null);
         });
-
         kakao.maps.event.addListener(polygon, 'click', () => {
-          setSelected({ name: districtName, value });
+          setSelected({ name: guName, value });
         });
-      });
 
-      // 구 이름 + 값 라벨 (각 feature당 1개)
-      const outerRing =
-        geometry.type === 'Polygon'
-          ? (geometry.coordinates as number[][][])[0]
-          : (geometry.coordinates as number[][][][])[0][0];
-      const [cLat, cLng] = centroidOfRing(outerRing);
+        // 구 중심 누적
+        const acc = guCenterAccum.get(guName) ?? { latSum: 0, lngSum: 0, count: 0 };
+        acc.latSum += cLat;
+        acc.lngSum += cLng;
+        acc.count += 1;
+        guCenterAccum.set(guName, acc);
+      });
+    });
+
+    // 구마다 이름 + 값 라벨 1개
+    guCenterAccum.forEach((acc, guName) => {
+      const cLat = acc.latSum / acc.count;
+      const cLng = acc.lngSum / acc.count;
+      const value = valueMap.get(guName)!;
 
       const labelEl = document.createElement('div');
       labelEl.className = 'district-label';
-      labelEl.innerHTML = `<span class="dl-name">${districtName}</span><span class="dl-value">${value.toLocaleString()}</span>`;
-      const labelOverlay = new kakao.maps.CustomOverlay({
+      labelEl.innerHTML = `<span class="dl-name">${guName}</span><span class="dl-value">${value.toLocaleString()}</span>`;
+      const overlay = new kakao.maps.CustomOverlay({
         content: labelEl,
         position: new kakao.maps.LatLng(cLat, cLng),
         yAnchor: 0.5,
         zIndex: 10,
       });
-      labelOverlay.setMap(map);
-      overlaysRef.current.push(labelOverlay);
+      overlay.setMap(map);
+      overlaysRef.current.push(overlay);
     });
 
     return () => {
@@ -146,7 +153,7 @@ export default function KakaoMap() {
     return (
       <div className="map-status loading">
         <div className="spinner" />
-        <p>지도를 불러오는 중...</p>
+        <p>지도 데이터를 불러오는 중...</p>
       </div>
     );
   }

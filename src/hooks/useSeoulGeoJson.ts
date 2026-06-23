@@ -1,13 +1,15 @@
 import { useState, useEffect } from 'react';
 
-// 행정안전부 공개 GeoJSON (서울 자치구 경계, WGS84)
-// southkorea/seoul-maps 오픈소스 데이터 (jsDelivr CDN)
-const GEOJSON_URL =
-  'https://cdn.jsdelivr.net/gh/southkorea/seoul-maps@master/kostat/2013/json/seoul_municipalities_geo_simple.json';
+export interface SeoulFeatureProperties {
+  adm_nm: string;   // "서울특별시 종로구 사직동"
+  adm_cd: string;   // 행정동 코드
+  sggnm: string;    // "종로구"  ← 구 이름
+  sidonm: string;   // "서울특별시"
+}
 
-export interface GeoFeature {
+export interface SeoulFeature {
   type: 'Feature';
-  properties: Record<string, string>;
+  properties: SeoulFeatureProperties;
   geometry: {
     type: 'Polygon' | 'MultiPolygon';
     coordinates: number[][][] | number[][][][];
@@ -16,7 +18,7 @@ export interface GeoFeature {
 
 export interface SeoulGeoJson {
   type: 'FeatureCollection';
-  features: GeoFeature[];
+  features: SeoulFeature[];
 }
 
 export function useSeoulGeoJson() {
@@ -25,7 +27,7 @@ export function useSeoulGeoJson() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    fetch(GEOJSON_URL)
+    fetch('/seoul.geojson')
       .then((res) => {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         return res.json() as Promise<SeoulGeoJson>;
@@ -43,7 +45,14 @@ export function useSeoulGeoJson() {
   return { data, loading, error };
 }
 
-// GeoJSON 좌표([lng, lat])를 Kakao LatLng 배열로 변환
+// GeoJSON 좌표 ([lng, lat]) → Kakao LatLng
 export function ringToLatLng(ring: number[][]): kakao.maps.LatLng[] {
   return ring.map(([lng, lat]) => new kakao.maps.LatLng(lat, lng));
+}
+
+// 외곽 링의 무게중심
+export function ringCentroid(ring: number[][]): [number, number] {
+  const lat = ring.reduce((s, p) => s + p[1], 0) / ring.length;
+  const lng = ring.reduce((s, p) => s + p[0], 0) / ring.length;
+  return [lat, lng];
 }
