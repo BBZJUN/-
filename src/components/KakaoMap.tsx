@@ -1,43 +1,35 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef } from 'react';
 import { useKakaoMapsSDK } from '../hooks/useKakaoMapsSDK';
-import {
-  useSeoulGeoJson,
-  ringToLatLng,
-  ringCentroid,
-  SeoulFeature,
-} from '../hooks/useSeoulGeoJson';
+import { useSeoulGeoJson, ringToLatLng, ringCentroid, SeoulFeature } from '../hooks/useSeoulGeoJson';
 import { SEOUL_DISTRICTS, DistrictInfo } from '../data/seoulDistrictData';
-import { getChoroColor, buildGradientCss } from '../utils/choropleth';
+import { GROUPS } from '../data/districtGroups';
 
 const SEOUL_CENTER = { lat: 37.5665, lng: 126.978 };
 const MAP_LEVEL = 10;
 
-const valueMap = new Map(SEOUL_DISTRICTS.map((d) => [d.name, d.value]));
-const allValues = SEOUL_DISTRICTS.map((d) => d.value);
-const MIN_VAL = Math.min(...allValues);
-const MAX_VAL = Math.max(...allValues);
+// 구 이름 → 구 데이터 맵
+const districtMap = new Map(SEOUL_DISTRICTS.map((d) => [d.name, d]));
 
-// feature의 geometry에서 outer ring 목록 반환
 function getOuterRings(feature: SeoulFeature): number[][][] {
   const { geometry } = feature;
   if (geometry.type === 'Polygon') {
-    return [geometry.coordinates[0] as number[][]];
+    return [(geometry.coordinates as number[][][])[0]];
   }
-  // MultiPolygon: 각 polygon의 outer ring
   return (geometry.coordinates as number[][][][]).map((poly) => poly[0]);
 }
 
-export default function KakaoMap() {
+interface Props {
+  onDistrictClick: (district: DistrictInfo) => void;
+}
+
+export default function KakaoMap({ onDistrictClick }: Props) {
   const mapRef = useRef<HTMLDivElement>(null);
-  const mapInstanceRef = useRef<kakao.maps.Map | null>(null);
   const polygonsRef = useRef<kakao.maps.Polygon[]>([]);
   const overlaysRef = useRef<kakao.maps.CustomOverlay[]>([]);
-  const hoverElRef = useRef<HTMLDivElement | null>(null);
   const hoverOverlayRef = useRef<kakao.maps.CustomOverlay | null>(null);
 
   const { isLoaded, error: sdkError } = useKakaoMapsSDK();
   const { data: geoJson, loading: geoLoading, error: geoError } = useSeoulGeoJson();
-  const [selected, setSelected] = useState<DistrictInfo | null>(null);
 
   useEffect(() => {
     if (!isLoaded || !geoJson || !mapRef.current) return;
@@ -46,12 +38,10 @@ export default function KakaoMap() {
       center: new kakao.maps.LatLng(SEOUL_CENTER.lat, SEOUL_CENTER.lng),
       level: MAP_LEVEL,
     });
-    mapInstanceRef.current = map;
 
     // hover 툴팁
     const hoverEl = document.createElement('div');
     hoverEl.className = 'district-tooltip';
-    hoverElRef.current = hoverEl;
     const hoverOverlay = new kakao.maps.CustomOverlay({
       content: hoverEl,
       position: new kakao.maps.LatLng(SEOUL_CENTER.lat, SEOUL_CENTER.lng),
@@ -60,16 +50,15 @@ export default function KakaoMap() {
     });
     hoverOverlayRef.current = hoverOverlay;
 
-    // 구별로 feature 묶기 → 구 라벨 중심 계산용
-    const guCenterAccum = new Map<string, { latSum: number; lngSum: number; count: number }>();
+    // 구별 라벨 중심 누적
+    const guAccum = new Map<string, { latSum: number; lngSum: number; count: number }>();
 
     geoJson.features.forEach((feature) => {
-      const guName = feature.properties.sggnm;       // 예: "종로구"
-      const dongName = feature.properties.adm_nm;    // 예: "서울특별시 종로구 사직동"
-      const value = valueMap.get(guName);
-      if (value === undefined) return; // 서울 25개 구 이외 제외
+      const guName = feature.properties.sggnm;
+      const districtInfo = districtMap.get(guName);
+      if (!districtInfo) return;
 
-      const color = getChoroColor(value, MIN_VAL, MAX_VAL);
+      const group = GROUPS[districtInfo.group];
       const outerRings = getOuterRings(feature);
 
       outerRings.forEach((ring) => {
@@ -79,9 +68,9 @@ export default function KakaoMap() {
           path,
           strokeWeight: 1,
           strokeColor: '#ffffff',
-          strokeOpacity: 0.7,
-          fillColor: color,
-          fillOpacity: 0.75,
+          strokeOpacity: 0.6,
+          fillColor: group.color,
+          fillOpacity: 0.65,
           zIndex: 1,
         });
         polygonsRef.current.push(polygon);
@@ -89,40 +78,33 @@ export default function KakaoMap() {
         const [cLat, cLng] = ringCentroid(ring);
 
         kakao.maps.event.addListener(polygon, 'mouseover', () => {
-          polygon.setOptions({ fillOpacity: 0.95, strokeWeight: 2 });
-          hoverEl.textContent = dongName;
+          polygon.setOptions({ fillOpacity: 0.88, strokeWeight: 2 });
+          hoverEl.textContent = guName;
           hoverOverlay.setPosition(new kakao.maps.LatLng(cLat, cLng));
           hoverOverlay.setMap(map);
         });
         kakao.maps.event.addListener(polygon, 'mouseout', () => {
-          polygon.setOptions({ fillOpacity: 0.75, strokeWeight: 1 });
+          polygon.setOptions({ fillOpacity: 0.65, strokeWeight: 1 });
           hoverOverlay.setMap(null);
         });
         kakao.maps.event.addListener(polygon, 'click', () => {
-          setSelected({ name: guName, value });
+          onDistrictClick(districtInfo);
         });
 
-        // 구 중심 누적
-        const acc = guCenterAccum.get(guName) ?? { latSum: 0, lngSum: 0, count: 0 };
-        acc.latSum += cLat;
-        acc.lngSum += cLng;
-        acc.count += 1;
-        guCenterAccum.set(guName, acc);
+        const acc = guAccum.get(guName) ?? { latSum: 0, lngSum: 0, count: 0 };
+        acc.latSum += cLat; acc.lngSum += cLng; acc.count += 1;
+        guAccum.set(guName, acc);
       });
     });
 
-    // 구마다 이름 + 값 라벨 1개
-    guCenterAccum.forEach((acc, guName) => {
-      const cLat = acc.latSum / acc.count;
-      const cLng = acc.lngSum / acc.count;
-      const value = valueMap.get(guName)!;
-
+    // 구 이름 라벨 (구당 1개)
+    guAccum.forEach((acc, guName) => {
       const labelEl = document.createElement('div');
       labelEl.className = 'district-label';
-      labelEl.innerHTML = `<span class="dl-name">${guName}</span><span class="dl-value">${value.toLocaleString()}</span>`;
+      labelEl.innerHTML = `<span class="dl-name">${guName}</span>`;
       const overlay = new kakao.maps.CustomOverlay({
         content: labelEl,
-        position: new kakao.maps.LatLng(cLat, cLng),
+        position: new kakao.maps.LatLng(acc.latSum / acc.count, acc.lngSum / acc.count),
         yAnchor: 0.5,
         zIndex: 10,
       });
@@ -137,83 +119,18 @@ export default function KakaoMap() {
       overlaysRef.current = [];
       hoverOverlay.setMap(null);
     };
-  }, [isLoaded, geoJson]);
+  }, [isLoaded, geoJson, onDistrictClick]);
 
   const error = sdkError ?? geoError;
   const loading = !isLoaded || geoLoading;
 
-  if (error) {
-    return (
-      <div className="map-status error">
-        <p>⚠️ {error}</p>
-      </div>
-    );
-  }
-  if (loading) {
-    return (
-      <div className="map-status loading">
-        <div className="spinner" />
-        <p>지도 데이터를 불러오는 중...</p>
-      </div>
-    );
-  }
-
-  return (
-    <div className="map-wrapper">
-      <div ref={mapRef} className="kakao-map" />
-
-      {selected && (
-        <div className="info-panel">
-          <button className="close-btn" onClick={() => setSelected(null)}>✕</button>
-          <div className="info-header">
-            <span
-              className="color-dot"
-              style={{ background: getChoroColor(selected.value, MIN_VAL, MAX_VAL) }}
-            />
-            <h3>{selected.name}</h3>
-          </div>
-          <ul className="info-list">
-            <li>
-              <span className="label">값</span>
-              <span className="value">{selected.value.toLocaleString()}</span>
-            </li>
-            <li>
-              <span className="label">범위 내 위치</span>
-              <span className="value">
-                {(((selected.value - MIN_VAL) / (MAX_VAL - MIN_VAL)) * 100).toFixed(1)}%
-              </span>
-            </li>
-          </ul>
-        </div>
-      )}
-
-      <div className="legend">
-        <h4>서울특별시 25개 자치구</h4>
-        <div className="gradient-bar-wrap">
-          <span className="grad-label">적음</span>
-          <div className="gradient-bar" style={{ background: buildGradientCss() }} />
-          <span className="grad-label">많음</span>
-        </div>
-        <div className="grad-minmax">
-          <span>{MIN_VAL.toLocaleString()}</span>
-          <span>{MAX_VAL.toLocaleString()}</span>
-        </div>
-        <div className="legend-grid">
-          {SEOUL_DISTRICTS.map((d) => (
-            <button
-              key={d.name}
-              className="legend-item"
-              onClick={() => setSelected(d)}
-            >
-              <span
-                className="legend-color"
-                style={{ background: getChoroColor(d.value, MIN_VAL, MAX_VAL) }}
-              />
-              <span className="legend-name">{d.name}</span>
-            </button>
-          ))}
-        </div>
-      </div>
+  if (error) return <div className="map-status error"><p>⚠️ {error}</p></div>;
+  if (loading) return (
+    <div className="map-status loading">
+      <div className="spinner" />
+      <p>지도 데이터를 불러오는 중...</p>
     </div>
   );
+
+  return <div ref={mapRef} className="kakao-map" />;
 }
